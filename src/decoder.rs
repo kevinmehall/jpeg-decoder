@@ -50,6 +50,7 @@ pub struct ImageInfo {
 /// JPEG decoder
 pub struct Decoder<R> {
     reader: R,
+    requested_size: Option<Dimensions>,
 
     frame: Option<FrameInfo>,
     dc_huffman_tables: Vec<Option<HuffmanTable>>,
@@ -70,8 +71,26 @@ pub struct Decoder<R> {
 impl<R: Read> Decoder<R> {
     /// Creates a new `Decoder` using the reader `reader`.
     pub fn new(reader: R) -> Decoder<R> {
+        Decoder::init(reader, None)
+    }
+
+    /// Creates a new `Decoder` using the reader `reader` that returns a
+    /// scaled image that is equal to or larger than the requested size in at
+    /// least one axis, or the full size of the image if the requested size is
+    /// larger.
+    /// 
+    /// This efficiently scales down the image by one of a fixed set of
+    /// available ratios during decoding. To generate a thumbnail of an
+    /// exact size, pass the desired size or larger and then scale to the
+    /// final size using a traditional resampling algorithm.
+    pub fn scaled(reader: R, requested_width: u16, requested_height: u16) -> Decoder<R> {
+        Decoder::init(reader, Some(Dimensions{ width: requested_width, height: requested_height }))
+    }
+    
+    fn init(reader: R, requested_size: Option<Dimensions>) -> Decoder<R> {
         Decoder {
             reader: reader,
+            requested_size,
             frame: None,
             dc_huffman_tables: vec![None, None, None, None],
             ac_huffman_tables: vec![None, None, None, None],
@@ -100,8 +119,8 @@ impl<R: Read> Decoder<R> {
                 };
 
                 Some(ImageInfo {
-                    width: frame.image_size.width,
-                    height: frame.image_size.height,
+                    width: frame.output_size.width,
+                    height: frame.output_size.height,
                     pixel_format: pixel_format,
                 })
             },
@@ -153,7 +172,7 @@ impl<R: Read> Decoder<R> {
                         return Err(Error::Unsupported(UnsupportedFeature::Hierarchical));
                     }
 
-                    let frame = parse_sof(&mut self.reader, marker)?;
+                    let frame = parse_sof(&mut self.reader, marker, self.requested_size)?;
                     let component_count = frame.components.len();
 
                     if frame.is_differential {
@@ -329,7 +348,7 @@ impl<R: Read> Decoder<R> {
         }
 
         let frame = self.frame.as_ref().unwrap();
-        compute_image(&frame.components, &planes, frame.image_size, self.is_jfif, self.color_transform)
+        compute_image(&frame.components, &planes, frame.output_size, self.is_jfif, self.color_transform)
     }
 
     fn read_marker(&mut self) -> Result<Marker> {
@@ -436,7 +455,7 @@ impl<R: Read> Decoder<R> {
                             let x = (block_num % blocks_per_row) as u16;
                             let y = (block_num / blocks_per_row) as u16;
 
-                            if x * 8 >= component.size.width || y * 8 >= component.size.height {
+                            if x * component.dct_scale as u16 >= component.size.width || y * component.dct_scale as u16 >= component.size.height {
                                 continue;
                             }
 
@@ -762,12 +781,15 @@ fn compute_image(components: &[Component],
             return Ok(data[0].clone())
         }
 
-        let mut buffer = vec![0u8; component.size.width as usize * component.size.height as usize];
-        let line_stride = component.block_size.width as usize * 8;
+        let width = component.size.width as usize;
+        let height = component.size.height as usize;
 
-        for y in 0 .. component.size.height as usize {
-            for x in 0 .. component.size.width as usize {
-                buffer[y * component.size.width as usize + x] = data[0][y * line_stride + x];
+        let mut buffer = vec![0u8; width * height];
+        let line_stride = width * component.dct_scale;
+
+        for y in 0 .. width {
+            for x in 0 .. height {
+                buffer[y * width + x] = data[0][y * line_stride + x];
             }
         }
 
