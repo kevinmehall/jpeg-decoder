@@ -36,7 +36,7 @@ impl HuffmanDecoder {
         let (value, size) = table.lut[self.peek_bits(LUT_BITS) as usize];
 
         if size > 0 {
-            self.consume_bits(size);
+            self.consume_bits(size)?;
             Ok(value)
         }
         else {
@@ -46,7 +46,7 @@ impl HuffmanDecoder {
                 let code = (bits >> (15 - i)) as i32;
 
                 if code <= table.maxcode[i as usize] {
-                    self.consume_bits(i + 1);
+                    self.consume_bits(i + 1)?;
 
                     let index = (code + table.delta[i as usize]) as usize;
                     return Ok(table.values[index]);
@@ -69,7 +69,7 @@ impl HuffmanDecoder {
                 let run = run_size >> 4;
                 let size = run_size & 0x0f;
 
-                self.consume_bits(size);
+                self.consume_bits(size)?;
                 return Ok(Some((value, run)));
             }
         }
@@ -84,7 +84,7 @@ impl HuffmanDecoder {
         }
 
         let bits = self.peek_bits(count);
-        self.consume_bits(count);
+        self.consume_bits(count)?;
 
         Ok(bits)
     }
@@ -107,26 +107,29 @@ impl HuffmanDecoder {
     #[inline]
     fn peek_bits(&mut self, count: u8) -> u16 {
         debug_assert!(count <= 16);
-        debug_assert!(self.num_bits >= count);
 
         ((self.bits >> (64 - count)) & ((1 << count) - 1)) as u16
     }
 
     #[inline]
-    fn consume_bits(&mut self, count: u8) {
-        debug_assert!(self.num_bits >= count);
-
-        self.bits <<= count as usize;
-        self.num_bits -= count;
+    fn consume_bits(&mut self, count: u8) -> Result<()> {
+        if self.num_bits >= count {
+            self.bits <<= count as usize;
+            self.num_bits -= count;
+            Ok(())
+        } else {
+            return Err(Error::Format("Premature end of data segment".into()));
+        }
     }
 
     fn read_bits<R: Read>(&mut self, reader: &mut R) -> Result<()> {
+        if self.marker.is_some() {
+            // no more bytes available
+            return Ok(())
+        }
+
         while self.num_bits <= 56 {
-            // Fill with zero bits if we have reached the end.
-            let byte = match self.marker {
-                Some(_) => 0,
-                None => read_u8(reader)?,
-            };
+            let byte = read_u8(reader)?;
 
             if byte == 0xFF {
                 let mut next_byte = read_u8(reader)?;
@@ -148,7 +151,7 @@ impl HuffmanDecoder {
                         _    => self.marker = Some(Marker::from_u8(next_byte).unwrap()),
                     }
 
-                    continue;
+                    break;
                 }
             }
 
